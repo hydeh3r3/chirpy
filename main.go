@@ -30,19 +30,18 @@ type chirpRequest struct {
 	Body string `json:"body"`
 }
 
-// chirpResponse represents the cleaned chirp response
+// chirpResponse represents the chirp data response
 type chirpResponse struct {
-	CleanedBody string `json:"cleaned_body"`
+	ID        string    `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserID    string    `json:"user_id"`
 }
 
 // errorResponse represents an error message response
 type errorResponse struct {
 	Error string `json:"error"`
-}
-
-// validResponse represents a success response
-type validResponse struct {
-	Valid bool `json:"valid"`
 }
 
 // userRequest represents the incoming JSON payload
@@ -56,6 +55,12 @@ type userResponse struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
+}
+
+// chirpCreateRequest represents the incoming JSON payload
+type chirpCreateRequest struct {
+	Body   string    `json:"body"`
+	UserID uuid.UUID `json:"user_id"`
 }
 
 // List of profane words to filter
@@ -148,7 +153,9 @@ func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
 	// Return cleaned chirp
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(chirpResponse{CleanedBody: cleanedChirp})
+	json.NewEncoder(w).Encode(chirpResponse{
+		Body: cleanedChirp,
+	})
 }
 
 // createUserHandler handles user creation requests
@@ -196,6 +203,76 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
 		Email:     user.Email,
+	})
+}
+
+// createChirpHandler handles chirp creation requests
+func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Read and parse request body
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Failed to read request"})
+		return
+	}
+
+	var req chirpCreateRequest
+	err = json.Unmarshal(body, &req)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Invalid JSON"})
+		return
+	}
+
+	// Validate chirp length
+	if len(req.Body) > 140 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Chirp is too long"})
+		return
+	}
+
+	// Clean the chirp text
+	words := strings.Split(req.Body, " ")
+	for i, word := range words {
+		wordLower := strings.ToLower(word)
+		for _, profane := range profaneWords {
+			if wordLower == profane {
+				words[i] = "****"
+				break
+			}
+		}
+	}
+	cleanedChirp := strings.Join(words, " ")
+
+	// Create chirp in database
+	now := time.Now().UTC()
+	chirp, err := cfg.db.CreateChirp(r.Context(), database.CreateChirpParams{
+		ID:        uuid.New(),
+		CreatedAt: now,
+		UpdatedAt: now,
+		Body:      cleanedChirp,
+		UserID:    req.UserID,
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Failed to create chirp"})
+		return
+	}
+
+	// Return response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(chirpResponse{
+		ID:        chirp.ID.String(),
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		UserID:    chirp.UserID.String(),
 	})
 }
 
@@ -265,8 +342,8 @@ func main() {
 
 	// Add API endpoints
 	mux.HandleFunc("/api/healthz", healthzHandler)
-	mux.HandleFunc("/api/validate_chirp", validateChirpHandler)
 	mux.HandleFunc("/api/users", apiCfg.createUserHandler)
+	mux.HandleFunc("/api/chirps", apiCfg.createChirpHandler)
 
 	// Add admin endpoints
 	mux.HandleFunc("/admin/metrics", apiCfg.metricsHandler)
