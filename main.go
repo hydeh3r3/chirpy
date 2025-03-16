@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/hydeh3r3/chirpy/internal/auth"
 	"github.com/hydeh3r3/chirpy/internal/database"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
@@ -22,6 +23,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	db             *database.Queries
 	platform       string
+	jwtSecret      string
 }
 
 // chirpResponse represents the chirp data response
@@ -40,7 +42,8 @@ type errorResponse struct {
 
 // userRequest represents the incoming JSON payload
 type userRequest struct {
-	Email string `json:"email"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 // userResponse represents the user data response
@@ -53,8 +56,23 @@ type userResponse struct {
 
 // chirpCreateRequest represents the incoming JSON payload
 type chirpCreateRequest struct {
-	Body   string    `json:"body"`
-	UserID uuid.UUID `json:"user_id"`
+	Body string `json:"body"`
+}
+
+// loginRequest represents the login request body
+type loginRequest struct {
+	Email            string `json:"email"`
+	Password         string `json:"password"`
+	ExpiresInSeconds *int   `json:"expires_in_seconds,omitempty"`
+}
+
+// loginResponse represents the login response body
+type loginResponse struct {
+	ID        string    `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
+	Token     string    `json:"token"`
 }
 
 // List of profane words to filter
@@ -123,13 +141,22 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Hash password
+	hashedPassword, err := auth.HashPassword(req.Password)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Failed to hash password"})
+		return
+	}
+
 	// Create user in database
 	now := time.Now().UTC()
 	user, err := cfg.db.CreateUser(r.Context(), database.CreateUserParams{
-		ID:        uuid.New(),
-		CreatedAt: now,
-		UpdatedAt: now,
-		Email:     req.Email,
+		ID:             uuid.New(),
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		Email:          req.Email,
+		HashedPassword: hashedPassword,
 	})
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -148,10 +175,94 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// loginHandler handles user login requests
+func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Read and parse request body
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Failed to read request"})
+		return
+	}
+
+	var req loginRequest
+	err = json.Unmarshal(body, &req)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Invalid JSON"})
+		return
+	}
+
+	// Get user from database
+	user, err := cfg.db.GetUserByEmail(r.Context(), req.Email)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Incorrect email or password"})
+		return
+	}
+
+	// Check password
+	err = auth.CheckPasswordHash(req.Password, user.HashedPassword)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Incorrect email or password"})
+		return
+	}
+
+	// Determine token expiration time
+	expiresIn := time.Hour // default 1 hour
+	if req.ExpiresInSeconds != nil {
+		requestedExpiry := time.Duration(*req.ExpiresInSeconds) * time.Second
+		if requestedExpiry > 0 && requestedExpiry <= time.Hour {
+			expiresIn = requestedExpiry
+		}
+	}
+
+	// Generate JWT token
+	token, err := auth.MakeJWT(user.ID, cfg.jwtSecret, expiresIn)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Failed to generate token"})
+		return
+	}
+
+	// Return response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(loginResponse{
+		ID:        user.ID.String(),
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
+		Token:     token,
+	})
+}
+
 // createChirpHandler handles chirp creation requests
 func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get and validate JWT token
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Missing or invalid token"})
+		return
+	}
+
+	// Validate token and get user ID
+	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Invalid token"})
 		return
 	}
 
@@ -198,7 +309,7 @@ func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request)
 		CreatedAt: now,
 		UpdatedAt: now,
 		Body:      cleanedChirp,
-		UserID:    req.UserID,
+		UserID:    userID,
 	})
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -359,6 +470,10 @@ func main() {
 	if platform == "" {
 		platform = "prod" // Default to prod for safety
 	}
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		panic("JWT_SECRET environment variable is not set")
+	}
 
 	// Open database connection
 	db, err := sql.Open("postgres", dbURL)
@@ -372,8 +487,9 @@ func main() {
 
 	// Create API config
 	apiCfg := &apiConfig{
-		db:       dbQueries,
-		platform: platform,
+		db:        dbQueries,
+		platform:  platform,
+		jwtSecret: jwtSecret,
 	}
 
 	// Create a new ServeMux instance
@@ -382,6 +498,7 @@ func main() {
 	// Add API endpoints
 	mux.HandleFunc("/api/healthz", healthzHandler)
 	mux.HandleFunc("/api/users", apiCfg.createUserHandler)
+	mux.HandleFunc("/api/login", apiCfg.loginHandler)
 	mux.HandleFunc("/api/chirps", apiCfg.chirpsHandler)
 	mux.HandleFunc("/api/chirps/{chirpID}", apiCfg.chirpsHandler)
 
