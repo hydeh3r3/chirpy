@@ -11,9 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/hydeh3r3/chirpy/internal/database"
-
 	"github.com/google/uuid"
+	"github.com/hydeh3r3/chirpy/internal/database"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 )
@@ -23,11 +22,6 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	db             *database.Queries
 	platform       string
-}
-
-// chirpRequest represents the incoming JSON payload
-type chirpRequest struct {
-	Body string `json:"body"`
 }
 
 // chirpResponse represents the chirp data response
@@ -104,58 +98,6 @@ func healthzHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
-}
-
-// validateChirpHandler handles chirp validation and cleaning
-func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Read the request body
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(errorResponse{Error: "Failed to read request"})
-		return
-	}
-
-	// Parse the JSON request
-	var chirp chirpRequest
-	err = json.Unmarshal(body, &chirp)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(errorResponse{Error: "Invalid JSON"})
-		return
-	}
-
-	// Validate chirp length
-	if len(chirp.Body) > 140 {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(errorResponse{Error: "Chirp is too long"})
-		return
-	}
-
-	// Clean the chirp text
-	words := strings.Split(chirp.Body, " ")
-	for i, word := range words {
-		wordLower := strings.ToLower(word)
-		for _, profane := range profaneWords {
-			if wordLower == profane {
-				words[i] = "****"
-				break
-			}
-		}
-	}
-	cleanedChirp := strings.Join(words, " ")
-
-	// Return cleaned chirp
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(chirpResponse{
-		Body: cleanedChirp,
-	})
 }
 
 // createUserHandler handles user creation requests
@@ -304,6 +246,103 @@ func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// getAllChirpsHandler handles requests to get all chirps
+func (cfg *apiConfig) getAllChirpsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get all chirps from database
+	chirps, err := cfg.db.GetAllChirps(r.Context())
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Failed to get chirps"})
+		return
+	}
+
+	// Convert to response format
+	response := make([]chirpResponse, len(chirps))
+	for i, chirp := range chirps {
+		response[i] = chirpResponse{
+			ID:        chirp.ID.String(),
+			CreatedAt: chirp.CreatedAt,
+			UpdatedAt: chirp.UpdatedAt,
+			Body:      chirp.Body,
+			UserID:    chirp.UserID.String(),
+		}
+	}
+
+	// Return response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+}
+
+// getChirpByIDHandler handles requests to get a single chirp
+func (cfg *apiConfig) getChirpByIDHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get chirp ID from path parameter
+	chirpIDStr := r.PathValue("chirpID")
+	if chirpIDStr == "" {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	// Convert string ID to UUID
+	chirpID, err := uuid.Parse(chirpIDStr)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	// Get chirp from database
+	chirp, err := cfg.db.GetChirpByID(r.Context(), chirpID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Failed to get chirp"})
+		return
+	}
+
+	// Return response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(chirpResponse{
+		ID:        chirp.ID.String(),
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		UserID:    chirp.UserID.String(),
+	})
+}
+
+// chirpsHandler handles both GET and POST requests for chirps
+func (cfg *apiConfig) chirpsHandler(w http.ResponseWriter, r *http.Request) {
+	// Check if this is a request for a specific chirp
+	if chirpID := r.PathValue("chirpID"); chirpID != "" {
+		cfg.getChirpByIDHandler(w, r)
+		return
+	}
+
+	// Handle collection endpoints
+	switch r.Method {
+	case http.MethodGet:
+		cfg.getAllChirpsHandler(w, r)
+	case http.MethodPost:
+		cfg.createChirpHandler(w, r)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
 func main() {
 	// Load .env file
 	err := godotenv.Load()
@@ -343,7 +382,8 @@ func main() {
 	// Add API endpoints
 	mux.HandleFunc("/api/healthz", healthzHandler)
 	mux.HandleFunc("/api/users", apiCfg.createUserHandler)
-	mux.HandleFunc("/api/chirps", apiCfg.createChirpHandler)
+	mux.HandleFunc("/api/chirps", apiCfg.chirpsHandler)
+	mux.HandleFunc("/api/chirps/{chirpID}", apiCfg.chirpsHandler)
 
 	// Add admin endpoints
 	mux.HandleFunc("/admin/metrics", apiCfg.metricsHandler)
