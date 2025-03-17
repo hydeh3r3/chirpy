@@ -1,75 +1,100 @@
 # Chirpy
 
-A social media API built with Go that allows users to create and validate "chirps" (posts limited to 140 characters).
+A social media API built with Go, featuring user authentication, chirp management, and premium user upgrades.
 
 ## Features
 
-- User management with PostgreSQL database
-- Chirp validation and profanity filtering
-- Admin dashboard with request metrics
-- Health check endpoint
-- Development mode with reset functionality
-
-## Prerequisites
-
-- Go 1.23.4 or higher
-- PostgreSQL
-- SQLC
-- Goose (for database migrations)
-
-## Setup
-
-1. Clone the repository
-2. Create a `.env` file with the following variables:
-   ```
-   DB_URL="postgres://username:password@localhost:5432/chirpy?sslmode=disable"
-   PLATFORM="dev"  # Set to "prod" in production
-   ```
-
-3. Create the database:
-   ```bash
-   createdb chirpy
-   ```
-
-4. Run database migrations:
-   ```bash
-   goose -dir sql/schema postgres "postgres://username:password@localhost:5432/chirpy?sslmode=disable" up
-   ```
-
-5. Generate SQLC code:
-   ```bash
-   sqlc generate
-   ```
-
-6. Run the server:
-   ```bash
-   go run main.go
-   ```
+- User authentication with JWT tokens and refresh tokens
+- Chirp creation, retrieval, and deletion
+- Profanity filtering for chirps
+- Premium user upgrades (Chirpy Red)
+- Webhook integration for user upgrades
+- Admin metrics and development tools
 
 ## API Endpoints
 
-### Public Endpoints
-
-- `GET /api/healthz` - Health check endpoint
-- `POST /api/validate_chirp` - Validate and clean chirp content
+### Authentication
 - `POST /api/users` - Create a new user
+- `POST /api/login` - Login and receive access/refresh tokens
+- `POST /api/refresh` - Get a new access token using refresh token
+- `POST /api/revoke` - Revoke a refresh token
 
-### Admin Endpoints
+### Chirps
+- `GET /api/chirps` - Get all chirps
+  - Optional query parameters:
+    - `author_id`: Filter chirps by author ID
+    - `sort`: Sort chirps by creation date
+      - `asc` (default): Sort in ascending order (oldest first)
+      - `desc`: Sort in descending order (newest first)
+- `GET /api/chirps/{chirpID}` - Get a specific chirp
+- `POST /api/chirps` - Create a new chirp
+- `DELETE /api/chirps/{chirpID}` - Delete a chirp (author only)
 
-- `GET /admin/metrics` - View request metrics dashboard
-- `POST /admin/reset` - Reset metrics and database (dev mode only)
+### User Management
+- `PUT /api/users` - Update user email and password
+- `POST /api/polka/webhooks` - Handle user upgrade events (requires API key)
 
-### File Server
+### Admin
+- `GET /admin/metrics` - View API usage metrics
+- `POST /admin/reset` - Reset database (development only)
 
-- `GET /app/*` - Serve static files
+## Setup
+
+1. Create a PostgreSQL database:
+```bash
+createdb chirpy
+```
+
+2. Set up environment variables in `.env`:
+```env
+DB_URL=postgres://username:password@localhost:5432/chirpy?sslmode=disable
+JWT_SECRET=your-secret-key
+POLKA_KEY=your-polka-api-key
+PLATFORM=dev  # or prod
+```
+
+3. Run database migrations:
+```bash
+goose -dir sql/schema postgres "postgres://username:password@localhost:5432/chirpy?sslmode=disable" up
+```
+
+4. Generate database code:
+```bash
+sqlc generate
+```
+
+5. Start the server:
+```bash
+go run .
+```
+
+## Testing
+
+The server includes a test suite that can be run with:
+```bash
+bootdev run 1304e939-bf50-48d3-a351-b35faafc267d -s
+```
 
 ## Development
 
-The project uses:
-- SQLC for type-safe database queries
-- Goose for database migrations
-- PostgreSQL for data storage
+- The server runs on port 8080 by default
+- Development mode enables additional endpoints and features
+- Profanity filtering is case-insensitive
+- Chirps are limited to 140 characters
+- Access tokens expire after 1 hour
+- Refresh tokens expire after 60 days
 
-## License
+## Security
 
-MIT 
+- Passwords are hashed using bcrypt
+- JWT tokens are used for authentication
+- Refresh tokens are stored securely in the database
+- User upgrades are processed via webhooks
+- Admin endpoints are protected in production
+
+## Database Schema
+
+The application uses the following main tables:
+- `users` - User accounts and authentication
+- `chirps` - User posts
+- `refresh_tokens` - Token management 
